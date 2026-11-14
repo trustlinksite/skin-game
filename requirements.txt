@@ -1,0 +1,3 @@
+# Pure Python 3.10+ standard library is sufficient (no required external packages).
+# Optional production WSGI server for VPS deployments:
+gunicorn>=21.2.0
