@@ -16,15 +16,21 @@ if BASE_DIR not in sys.path:
 from game_data import get_client_config
 from leaderboard import get_top_scores, init_db, submit_score
 
-TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "index.html")
+TEMPLATE_CANDIDATES = [
+    os.path.join(BASE_DIR, "templates", "index.html"),
+    os.path.join(BASE_DIR, "index.html"),
+]
 init_db()
 
 
-def _render_game_html() -> bytes:
-    with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
+def _render_game_html() -> bytes | None:
+    template_file = next((p for p in TEMPLATE_CANDIDATES if os.path.isfile(p)), None)
+    if template_file is None:
+        return None
+    with open(template_file, "r", encoding="utf-8") as f:
         html = f.read()
     cfg_json = json.dumps(get_client_config(), ensure_ascii=False)
-    return html.replace("__PY_GAME_CONFIG__", cfg_json).encode("utf-8")
+    return html.replace("/*__PY_CONFIG_HOOK__*/null", cfg_json).encode("utf-8")
 
 
 NO_CACHE_HEADERS = [
@@ -50,6 +56,15 @@ def handle_request(method: str, path: str, body: bytes) -> tuple[int, str, list[
 
     if clean_path in ("/", "/index.html") and method == "GET":
         payload = _render_game_html()
+        if payload is None:
+            msg = (
+                "<!doctype html><html lang='fa' dir='rtl'><meta charset='utf-8'>"
+                "<body style='font-family:tahoma,sans-serif;background:#2b192e;color:#ffe5ec;padding:24px'>"
+                "<h3>سرور پایتون لیدربرد فعال است ✅</h3>"
+                "<p>فایل <code>templates/index.html</code> یا <code>index.html</code> کنار <code>app.py</code> پیدا نشد، "
+                "اما API لیدربرد آماده است.</p></body></html>"
+            ).encode("utf-8")
+            return 200, "text/html; charset=utf-8", NO_CACHE_HEADERS, msg
         return 200, "text/html; charset=utf-8", NO_CACHE_HEADERS, payload
 
     if clean_path == "/api/health" and method == "GET":
@@ -106,32 +121,43 @@ class _GameHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
-    def _dispatch(self) -> None:
-        length = 0
-        if "Content-Length" in self.headers:
-            try:
-                length = max(0, min(int(self.headers["Content-Length"]), 65536))
-            except ValueError:
-                length = 0
-        body = self.rfile.read(length) if length > 0 else b""
-        status, ctype, extra_headers, payload = handle_request(self.command, self.path, body)
+    def _dispatch(self, head_only: bool = False) -> None:
+        try:
+            length = 0
+            if "Content-Length" in self.headers:
+                try:
+                    length = max(0, min(int(self.headers["Content-Length"]), 65536))
+                except ValueError:
+                    length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            method = "GET" if head_only else self.command
+            status, ctype, extra_headers, payload = handle_request(method, self.path, body)
+        except Exception as exc:
+            status = 500
+            ctype = "application/json; charset=utf-8"
+            extra_headers = NO_CACHE_HEADERS + _cors_headers()
+            payload = json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False).encode("utf-8")
+
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(payload)))
         for k, v in extra_headers:
             self.send_header(k, v)
         self.end_headers()
-        if payload:
+        if payload and not head_only:
             self.wfile.write(payload)
 
     def do_GET(self) -> None:
-        self._dispatch()
+        self._dispatch(False)
+
+    def do_HEAD(self) -> None:
+        self._dispatch(True)
 
     def do_POST(self) -> None:
-        self._dispatch()
+        self._dispatch(False)
 
     def do_OPTIONS(self) -> None:
-        self._dispatch()
+        self._dispatch(False)
 
 
 def main() -> None:
